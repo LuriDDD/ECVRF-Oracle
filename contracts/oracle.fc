@@ -1,0 +1,218 @@
+
+#include "common/stdlib.fc";
+#include "oracle/exotic.fif.fc";
+#include "oracle/ecvrf.fc";
+
+(int, slice) load_bounced_sender(cell in_msg) inline {
+  slice in_msg = in_msg.begin_parse();
+  int b = in_msg~load_uint(4) & 1;
+  return (b, in_msg~load_msg_addr());
+}
+
+() terminate()          impure asm "RETALT";
+() terminate_if(int)    impure asm "IFRETALT";
+tuple get_prev_mc_blocks() impure asm "PREVMCBLOCKS";
+
+(slice, int) dict_get?(cell dict, int key_len, slice index) asm(index dict key_len) "DICTGET" "NULLSWAPIFNOT";
+(cell, (slice, slice)) ~dict_delgetmin(cell dict, int key_len) asm "DICTREMMIN" "150 THROWIFNOT";
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+const int milliton = 1000000;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+global cell storage::subscriptions;
+global int storage::unfulfilled_requests;
+global int storage::subscribed_contracts;
+global int storage::tier;
+global int storage::seqno;
+global slice storage::owner;
+global int storage::public_key_ecvrf;
+global int storage::public_key_replay;
+global int storage::last_rand_unixtime;
+global int storage::prev_block_root_hash;
+{-
+    seqno: Int as uint64;
+    subscriptions: map<Address, Int as uint64>;
+    unfulfilled_requests: Int as uint64;
+    subscribed_contracts: Int as uint8;
+    tier: Int as uint16;
+    
+    owner: Address;
+    public_key_ecvrf: Int as uint256;
+    public_key_replay: Int as uint256;
+    last_rand_unixtime: Int as uint32;
+    prev_block_root_hash: Int as uint256;
+-}
+
+() load_data() impure inline {
+    slice ds = get_data().begin_parse();
+    storage::subscriptions = ds~load_dict();
+    storage::unfulfilled_requests = ds~load_uint(64);
+    storage::subscribed_contracts = ds~load_uint(8);
+    storage::tier = ds~load_uint(16);
+    storage::seqno = ds~load_uint(64);
+    storage::owner = ds~load_msg_addr();
+    storage::public_key_ecvrf = ds~load_uint(256);
+    storage::public_key_replay = ds~load_uint(256);
+    storage::last_rand_unixtime = ds~load_uint(32);
+    ds = ds~load_ref().begin_parse();
+    storage::prev_block_root_hash = ds~load_uint(256);
+    return ();
+}
+
+() save_data() impure inline {
+    set_data(begin_cell()
+        .store_dict(storage::subscriptions)
+        .store_uint(storage::unfulfilled_requests, 64)
+        .store_uint(storage::subscribed_contracts, 8)
+        .store_uint(storage::tier, 16)
+        .store_uint(storage::seqno, 64)
+        .store_slice(storage::owner)
+        .store_uint(storage::public_key_ecvrf, 256)
+        .store_uint(storage::public_key_replay, 256)
+        .store_uint(storage::last_rand_unixtime, 32)
+        .store_ref(begin_cell()
+            .store_uint(storage::prev_block_root_hash, 256)
+            .end_cell())
+        .end_cell()
+    );
+    return ();
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; op::subscribe_random#AB4C4859 consumer:MsgAddressInt = InMsgBody;
+;; op::withdraw#CB03BFAF = InMsgBody;
+
+() recv_internal(int msg_balance, cell in_msg, slice in_msg_body) {
+    terminate_if(in_msg_body.slice_bits() < 32);
+    
+    (int bounced, slice sender) = in_msg.load_bounced_sender();
+    terminate_if(bounced);
+    load_data();
+    
+    int op = in_msg_body~load_uint(32);
+    if (op == 0xAB4C4859) {
+        int added_messages = (msg_balance - 10 * milliton) / ((60 + storage::tier) * milliton);
+        terminate_if(added_messages <= 0);
+        
+        slice consumer = in_msg_body~load_msg_addr();
+        (slice messages, int already_subscribed) = storage::subscriptions.dict_get?(267, consumer);
+        storage::unfulfilled_requests += added_messages;
+        
+        if (~ already_subscribed) {
+            storage::subscribed_contracts += 1;
+            throw_if(170, storage::subscribed_contracts > 255);
+        } else {
+            added_messages += messages.preload_uint(64);
+        }
+        
+        storage::subscriptions~dict_set_builder(267, consumer, begin_cell().store_uint(added_messages, 64));
+        save_data();
+    } elseif (op == 0xCB03BFAF) {
+        throw_unless(171, equal_slices(sender, storage::owner));
+        
+        raw_reserve((50 + storage::tier) * milliton * storage::unfulfilled_requests, 0);
+        send_raw_message(begin_cell()
+          .store_uint(0x18, 6)
+          .store_slice(storage::owner)
+          .store_coins(0)
+          .store_uint(0, 107)
+          .end_cell(), 128);
+    }
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+builder get_alpha_b() inline {
+    load_data();
+    return begin_cell()
+      .store_uint(begin_cell().store_uint(storage::seqno, 64).store_uint(storage::last_rand_unixtime, 32).store_uint(storage::prev_block_root_hash, 256).end_cell().cell_hash(), 256);
+}
+
+slice get_alpha() inline method_id {
+    return get_alpha_b().end_cell().begin_parse();
+}
+
+(int, int, int, int) get_oracle_data() method_id {
+    load_data();
+    return (storage::seqno, storage::unfulfilled_requests, storage::last_rand_unixtime, storage::prev_block_root_hash);
+}
+
+int get_unfulfilled() method_id {
+    load_data();
+    return storage::unfulfilled_requests;
+}
+
+int get_subscribers() method_id {
+    load_data();
+    return storage::subscribed_contracts;
+}
+
+int get_tier() method_id {
+    load_data();
+    return storage::tier;
+}
+
+int get_requests_cost(int n) method_id {
+    load_data();
+    return (60 + storage::tier) * milliton * n + 10 * milliton;
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; op::provide_proved_random#_ contract_sig:^bits512 pi:Slice = ExternalInMsgBody;
+;; op::provide_random#069CECA8 rnd:u256 = OutMsgBody;
+
+() recv_external(slice pi) {
+    load_data();
+    throw_unless(130, now() > storage::last_rand_unixtime);
+    throw_if(131, storage::unfulfilled_requests == 0);
+    
+    var cs = pi;
+    throw_unless(33, cs~load_uint(32) == storage::seqno);
+
+    slice sig = pi~load_ref().begin_parse();
+    throw_unless(131, check_signature(slice_hash(pi), sig, storage::public_key_replay));  ;; the message was produced by oracle
+    accept_message();
+    builder alpha_b = get_alpha_b();
+    storage::seqno = storage::seqno + 1;
+    save_data();
+    commit();
+    pi~load_uint(32);
+
+    int rnd = ecvrf::rist255::verify_and_hash(storage::public_key_ecvrf, alpha_b, pi);  ;; proved that oracle not cheats
+    cell cur_random = begin_cell().store_uint(0x069CECA8, 32).store_uint(rnd, 256).end_cell();  ;; for broadcasting
+
+    cell new_subs = new_dict();
+    storage::unfulfilled_requests -= storage::subscribed_contracts;
+    repeat(storage::subscribed_contracts) {
+        (slice remaining_messages, slice consumer) = storage::subscriptions~dict_delgetmin(267);
+        int remaining = remaining_messages.preload_uint(64);
+        
+        if (remaining > 1) {
+            new_subs~dict_set_builder(267, consumer, begin_cell().store_uint(remaining - 1, 64));
+        } else {
+            storage::subscribed_contracts -= 1;
+        }
+        
+        send_raw_message(begin_cell()
+            .store_uint(0x18, 6)
+            .store_slice(consumer)
+            .store_coins(30 * milliton)
+            .store_uint(1, 107)
+            .store_ref(cur_random)
+            .end_cell(), 2);
+    }
+
+    storage::subscriptions = new_subs;
+    var prev_mc_block = get_prev_mc_blocks();
+    (_, _, _, int root_hash, _) = untuple5(prev_mc_block.at(0));
+
+    storage::prev_block_root_hash = root_hash;
+    storage::last_rand_unixtime = now();
+    
+    save_data();
+}
