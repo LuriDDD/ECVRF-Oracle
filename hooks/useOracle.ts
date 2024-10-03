@@ -1,5 +1,5 @@
 import { sleep } from "@ton/blueprint";
-import { KeyPair } from "@ton/crypto";
+import { mnemonicNew, mnemonicToPrivateKey } from "@ton/crypto";
 import { Blockchain, SandboxContract, TreasuryContract } from "@ton/sandbox";
 import { Address, TonClient } from "@ton/ton";
 import { Oracle, ORACLE_CONTRACT_CODE_CELL, OracleConfig } from "../wrappers/Oracle";
@@ -9,7 +9,7 @@ export async function deployOracle(
     sender: any,
     params: {
         ownerAddress: Address
-        keyPair: KeyPair,
+        publicKey: Buffer,
         secretKeyECVRF: bigint
     }
 ) {
@@ -20,7 +20,7 @@ export async function deployOracle(
     
     const invalidOracle = blockchain.openContract(Oracle.createFromConfig({
         ownerAddress: deployer.address, 
-        publicKey: params.keyPair.publicKey,
+        publicKey: params.publicKey,
         publicKeyECVRF: 0n
     }, 
         code));
@@ -28,7 +28,7 @@ export async function deployOracle(
 
     const config: OracleConfig = {
         ownerAddress: params.ownerAddress,
-        publicKey: params.keyPair.publicKey,
+        publicKey: params.publicKey,
         publicKeyECVRF: await invalidOracle.getPublicKey(params.secretKeyECVRF)
     }
     const oracle = ton.open(Oracle.createFromConfig(config, code));
@@ -43,7 +43,7 @@ export async function startOracle(
     ton: TonClient,
     params: {
         oracleAddress: Address
-        keyPair: KeyPair,
+        secretKey: Buffer,
         secretKeyECVRF: bigint
     }
 ) {
@@ -51,10 +51,12 @@ export async function startOracle(
 
     const blockchain = await Blockchain.create({config: 'slim'});
     let deployer: SandboxContract<TreasuryContract> = await blockchain.treasury('deployer');
+
+    let invalidKeyPair = await mnemonicToPrivateKey(await mnemonicNew())
     
     const invalidOracle = blockchain.openContract(Oracle.createFromConfig({
         ownerAddress: deployer.address, 
-        publicKey: params.keyPair.publicKey,
+        publicKey: invalidKeyPair.publicKey,
         publicKeyECVRF: 0n
     }, 
         code));
@@ -68,15 +70,13 @@ export async function startOracle(
 
     console.log('Begin loop');
     let seqno = 0
-    let sendingTime = 0
     while (true) {
         let data = await oracle.getOracleData()
         console.log("seqno:", data.seqno, "requests:", data.unfulfilledRequests, "lastRandTime:", data.lastRandTime, "previousBlockRootHash:", data.previousBlockRootHash)
-        if ((seqno != data.seqno || sendingTime + 30000 <= Date.now()) && data.unfulfilledRequests != 0) {
+        if (seqno != data.seqno && data.unfulfilledRequests != 0) {
             let alpha = await oracle.getAlpha();
             let pi = await invalidOracle.getCalcPiFromAlpha(params.secretKeyECVRF, alpha);
-            await oracle.sendProvideRandomness(data.seqno, pi, params.keyPair.secretKey);
-            sendingTime = Date.now()
+            await oracle.sendProvideRandomness(data.seqno, pi, params.secretKey);
             seqno = data.seqno
         }
         await sleep(1000)

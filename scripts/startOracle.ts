@@ -9,11 +9,10 @@ export async function run(provider: NetworkProvider) {
     const password = '';
     const oracleAddress = Address.parse("")
     const mnemonics = ''.split(',');
-    console.log(provider.api())
 
     await startOracle(provider.api() as TonClient, {
         oracleAddress,
-        keyPair: await mnemonicToPrivateKey(mnemonics), 
+        secretKey: (await mnemonicToPrivateKey(mnemonics, password)).secretKey, 
         secretKeyECVRF
     })
 }
