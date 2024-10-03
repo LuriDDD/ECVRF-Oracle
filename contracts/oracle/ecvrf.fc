@@ -14,6 +14,8 @@ int rist255::add(int, int) asm "RIST255_ADD";
 int rist255::sub(int, int) asm "RIST255_SUB";
 int rist255::order() asm "RIST255_PUSHL";
 
+int mulmod(int, int, int) asm "MULMOD";
+
 int sha256::hash_one(builder a) asm "ONE HASHEXT_SHA256";
 int sha256::hash_two(builder a, builder b) asm "TWO HASHEXT_SHA256";
 
@@ -76,7 +78,7 @@ slice ecvrf::rist255::with_secret::prove(int secret, slice alpha) method_id {
     int k = ecvrf::rist255::with_secret::generate_nonce(secret, h);
     int c = ecvrf::rist255::generate_challenge(public_key, h, gamma,
         rist255::base(k), h.rist255::multiply(k));
-    int s = (k + c * secret) % rist255::order();
+    int s = (k + mulmod(c, secret, rist255::order())) % rist255::order();
     return begin_cell()
         .store_uint(gamma, curve_bit_len)
         .store_uint(c, challenge_len)
